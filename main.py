@@ -8,6 +8,7 @@ import easyocr
 import os
 from docx2pdf import convert
 import tempfile
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 
 bot = telebot.TeleBot('7136593333:AAEoE6Zx-0fCblBsbQFNCtoVa0LnoyLIYfo')
 reader = easyocr.Reader(['en', 'ru'])
@@ -16,15 +17,13 @@ reader = easyocr.Reader(['en', 'ru'])
 @bot.message_handler(commands=['start'])
 def main(message):
     bot.send_message(message.chat.id, 'Привет, этот бот способен конвертировать файлы.\n'
-    'Для просмотра команд напишите /menu')
+                                      'Для просмотра команд напишите /menu')
 
 
 @bot.message_handler(commands=['menu'])
 def send_menu(message):
     bot.send_message(message.chat.id, '/photo Команда для составления фото отчета.\n'
-    '/document Команда для конвертирования файлов(pdf <=> docx)\n'
-    '/video Команда для конвертирования видеофайлов(MP4 <=> Webm)\n'
-    '/audio Команда для конвертирования аудиофайлов(Wav <=> Ogg)')
+                                      '/document Команда для конвертирования файлов(pdf <=> docx)\n')
 
 
 @bot.message_handler(commands=['photo'])
@@ -37,50 +36,46 @@ def main(message):
     bot.send_message(message.chat.id, 'Отправьте файл для конвертации')
 
 
-@bot.message_handler(commands=['video'])
-def main(message):
-    bot.send_message(message.chat.id, 'Отправьте видеофайл для конвертации')
-
-
-@bot.message_handler(commands=['audio'])
-def main(message):
-    bot.send_message(message.chat.id, 'Отправьте аудиофайл для конвертации')
-
-
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
-    # Получаем информацию о фото
-    file_info = bot.get_file(message.photo[-1].file_id)
-    downloaded_file = bot.download_file(file_info.file_path)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
 
-    # Сохраняем изображение во временный файл
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_image:
-        temp_image.write(downloaded_file)
-        temp_image_path = temp_image.name
+        temp_image_path = os.path.join(temp_dir, "temp_image.jpg")
+        with open(temp_image_path, "wb") as temp_image:
+            temp_image.write(downloaded_file)
 
-    # Извлекаем текст с изображения
-    result = reader.readtext(temp_image_path)
+        result = reader.readtext(temp_image_path)
 
-    # Удаляем временный файл
-    os.remove(temp_image_path)
+        doc = Document()
+        text_lines = [clean_and_format_text(detection[1]) for detection in result]
+        combined_lines = combine_lines(text_lines)
+        formatted_lines = format_lines(combined_lines)
 
-    # Создаем документ Word и записываем извлеченный текст
-    doc = Document()
-    for detection in result:
-        text = detection[1]
-        doc.add_paragraph(text)
+        for line in formatted_lines:
+            paragraph = doc.add_paragraph(line)
+            paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
 
-    # Сохраняем документ Word во временный файл
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as temp_doc:
-        doc.save(temp_doc.name)
-        doc_filename = temp_doc.name
+        temp_doc_path = os.path.join(temp_dir, "temp_doc.docx")
+        doc.save(temp_doc_path)
 
-    # Отправляем файл пользователю
-    with open(doc_filename, "rb") as doc_file:
-        bot.send_document(message.chat.id, doc_file)
+        with open(temp_doc_path, "rb") as doc_file:
+            bot.send_document(message.chat.id, doc_file)
 
-    # Удаляем временный файл документа
-    os.remove(doc_filename)
+        # Теперь конвертируем в формат .prn
+        converted_prn = convert_docx_to_prn(temp_doc_path)
+        # Отправляем конвертированный документ пользователю как файл с расширением .prn
+        with open(converted_prn, "rb") as prn_file:
+            bot.send_document(message.chat.id, prn_file, caption="Конвертированный документ.prn")
+
+    # Удаляем временные файлы
+    if os.path.exists(temp_image_path):
+        os.remove(temp_image_path)
+    if os.path.exists(temp_doc_path):
+        os.remove(temp_doc_path)
+    if os.path.exists(converted_prn):
+        os.remove(converted_prn)
 
 
 @bot.message_handler(content_types=['document'])
@@ -162,6 +157,84 @@ def handle_video(message):
         bot.reply_to(message, "Поддерживаются только видеоформаты MP4 и WebM")
 
 
+def clean_and_format_text(text):
+    text = ' '.join(text.split())
+    replacements = {
+        "email: kos@kos ru": "email: kos@kos.ru",
+        "+7(843) 533 _98~09": "+7(843) 533-98-09",
+        "e- mail": "email",
+        "+7(843) 533 98 09": "+7(843) 533-98-09",
+        "Polyethylene 11503 070,": "Polyethylene 11503 - 070,",
+        "LOT Ng": "LOT №",
+        "Dale": "Date",
+        "Pallet Ng": "Pallet - №",
+        "Malerial": "Material",
+        "Net Weight;": "Net Weight",
+        "Code kg": "kg",
+        "Material Polyethylene ": "Material == Polyethylene ",
+        "Polyelhylene": "Polyethylene",
+        "Polycarbonale": "Polycarbonate",
+        "Pallel": "Pallet",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def combine_lines(text_lines):
+    combined_lines = []
+    current_line = ""
+    for line in text_lines:
+        if any(keyword in line for keyword in ["KAZANORGSINTEZ", "Belomorskaya", "email", "Polyethylene", "LOT", "Date", "Pallet", "Material", "Net Weight", "Code"]):
+            if current_line:
+                combined_lines.append(current_line.strip())
+            current_line = line
+        else:
+            current_line += " " + line
+    if current_line:
+        combined_lines.append(current_line.strip())
+    return combined_lines
+
+
+def format_lines(lines):
+    formatted_lines = []
+    for line in lines:
+        if "420051" in line:
+            line = line.replace("420051", "420051\n")
+        if "LOT Ng" in line:
+            line = line.replace("LOT Ng", "LOT № ==")
+        if "Date" in line:
+            line = line.replace("Date", "Date ==")
+        if "Pallet Ng" in line:
+            line = line.replace("Pallet Ng", "Pallet № ==")
+        if "Pallet _ Ng" in line:
+            line = line.replace("Pallet _ Ng", "Pallet № ==")
+        if "Material Code" in line:
+            line = line.replace("Material Code", "Material Code ==")
+        if "Net Weight" in line:
+            line = line.replace("Net Weight", "Net Weight, kg ==")
+        if "Polyethylene 15813 020" in line:
+            line = line.replace("Polyethylene 15813 020", "Polyethylene 15813-020")
+        if "Polyethylene 15813  020" in line:
+            line = line.replace("Polyethylene 15813  020", "Polyethylene 15813-020")
+        if "[01" in line:
+            line = line.replace("[01", "101")
+        if "kos@kos ru" in line:
+            line = line.replace("kos@kos ru", "kos@kos.ru")
+        if "e- mail" in line:
+            line = line.replace("e- mail", "email")
+        if "e mail" in line:
+            line = line.replace("e mail", "email")
+        if "(TР" in line:
+            line = line.replace("(TР", "TP\n")
+        if "7(" in line:
+            line = line.replace("7(", "+7(")
+        if " ~" in line:
+            line = line.replace(" ~", "-")
+        formatted_lines.append(line)
+    return formatted_lines
+
+
 def convert_audio(audio_bytes, from_format, to_format):
     audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=from_format)
     output_stream = io.BytesIO()
@@ -215,6 +288,23 @@ def convert_docx_to_pdf(docx_path):
     pdf_path = docx_path.replace(".docx", ".pdf")
     convert(docx_path, pdf_path)
     return pdf_path
+
+
+def convert_docx_to_prn(docx_path):
+    # Открываем файл DOCX
+    doc = Document(docx_path)
+
+    # Извлекаем текст из документа
+    text_content = ""
+    for paragraph in doc.paragraphs:
+        text_content += paragraph.text + "\n"
+
+    # Создаем файл PRN и записываем в него текст
+    prn_path = docx_path.replace(".docx", ".prn")
+    with open(prn_path, "w", encoding="utf-8") as prn_file:
+        prn_file.write(text_content)
+
+    return prn_path
 
 
 bot.polling(none_stop=True)
